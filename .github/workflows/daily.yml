@@ -5,11 +5,13 @@ on:
     # Été (CEST): 05:00 UTC = 07:00 Paris
     # Hiver (CET): 06:00 UTC = 07:00 Paris
     - cron: "0 5,6 * * *"
+  # Permet de forcer un envoi depuis l'onglet "Actions"
   workflow_dispatch:
 
 jobs:
   send-countdown:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -24,16 +26,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pillow tzdata
 
-      - name: Run at 07:00 Europe/Paris only
+      - name: Run at 07:00 Europe/Paris (or force on manual run)
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Force l’envoi quand on lance depuis "Run workflow"
+          FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
         run: |
           python - <<'PY'
-          import datetime as dt, os, sys, subprocess
+          import os, datetime as dt
           from zoneinfo import ZoneInfo
+          force = os.getenv("FORCE_SEND") == "1"
           now_paris = dt.datetime.now(ZoneInfo("Europe/Paris"))
-          if now_paris.hour != 7:
-              print(f"[skip] Paris time is {now_paris:%H:%M}, not 07:00.")
-              sys.exit(0)
-          import countdown  # exécute l'envoi si 07:00
+          if not force and now_paris.hour != 7:
+              print(f"[skip] Paris time is {now_paris:%H:%M}, not 07:00. Use Run workflow to force.")
+              raise SystemExit(0)
+          import countdown  # exécute l'envoi
           PY
