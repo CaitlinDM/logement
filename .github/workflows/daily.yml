@@ -5,6 +5,7 @@ on:
     # Été (CEST): 05:00 UTC = 07:00 Paris
     # Hiver (CET): 06:00 UTC = 07:00 Paris
     - cron: "0 5,6 * * *"
+  # Permet de déclencher manuellement pour tester (envoi immédiat)
   workflow_dispatch:
 
 jobs:
@@ -20,24 +21,13 @@ jobs:
         with:
           python-version: "3.x"
 
-      # Librairies système nécessaires à Pillow (pas de CairoSVG ici)
-      - name: Install system libs
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libcairo2 \
-            libpango-1.0-0 \
-            libpangocairo-1.0-0 \
-            libgdk-pixbuf2.0-0 \
-            libffi-dev
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests pillow tzdata
 
-      # Envoi auto à 07:00 Paris, ou envoi forcé si déclenché manuellement
-      - name: Run countdown
+      # Envoi auto à 07:00 Europe/Paris ; envoi forcé si "Run workflow"
+      - name: Run countdown (07:00 Paris or force on manual run)
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
@@ -45,7 +35,7 @@ jobs:
           python - <<'PY'
           import os, datetime as dt
           from zoneinfo import ZoneInfo
-          import countdown
+          import countdown  # ton script génère l'image et ENVOIE avec @everyone
 
           force = os.getenv("FORCE_SEND") == "1"
           now_paris = dt.datetime.now(ZoneInfo("Europe/Paris"))
