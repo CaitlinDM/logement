@@ -1,78 +1,101 @@
 # countdown.py
 import os, io, datetime as dt, requests
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 
-# ─────────────────────── CONFIG ───────────────────────
+# ───────────────────── CONFIG ─────────────────────
 WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 
 EVENTS = [
-    # (label, date ISO, icon, left color, right color)
-    ("Signature du bail", "2025-08-22", "calendar", "#ff7a6e", "#ff5db1"),  # rose/corail
-    ("Emménagement",      "2025-08-30", "home",     "#21d4fd", "#28e06e"),  # cyan/vert
+    # (label, date ISO, icon: 'calendar' | 'house', hex card color)
+    ("Signature du bail", "2025-08-22", "calendar", "#f9c068"),
+    ("Emménagement",      "2025-08-30", "house",    "#438c55"),
 ]
 
-# image finale
-W, H   = 1024, 512          # taille globale (aperçu Discord)
-M      = 28                 # marge extérieure
-GAP    = 28                 # espace entre cartes
-CARD_R = 44                 # rayon coins cartes
-BG     = "#202329"          # fond sombre (rien ne doit dépasser dessus)
+# Image finale (fond TRANSPARENT)
+W, H   = 1024, 512
+M      = 24           # marge extérieure
+GAP    = 28           # espace entre cartes
+CARD_R = 44           # rayon des coins
+PAD_X  = 28           # padding interne des cartes
+PAD_TOP, PAD_BOTTOM = 34, 28
 
-# Mise en page interne de chaque carte (padding)
-PAD_TOP    = 36
-PAD_BOTTOM = 30
-PAD_X      = 28
+# Icônes (taille cible dans la carte)
+ICON_W, ICON_H = 120, 120  # SVG rasterisé ~2x plus petit qu'avant
 
-# Icônes 2x plus petites (scale 0.5 au lieu de 1.0)
-ICON_SCALE = 0.5
-
-# ───────────────── util couleur/forme ─────────────────
+# ───────────── util couleurs/forme ─────────────
 def hex_to_rgb(h):
-    h = h.lstrip("#"); return tuple(int(h[i:i+2],16) for i in (0,2,4))
-def lerp(a,b,t): return a + (b-a)*t
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0,2,4))
 
-def grad_rect(size, c1, c2):
+def darken(hex_color, factor=0.22):
+    """Assombrit légèrement la couleur pour la pastille date."""
+    r,g,b = hex_to_rgb(hex_color)
+    r = int(r * (1 - factor))
+    g = int(g * (1 - factor))
+    b = int(b * (1 - factor))
+    return (r,g,b, 200)  # alpha pour pill (semi-opaque)
+
+def rounded_rect_rgba(size, radius, fill_hex):
+    """Carte pleine couleur avec coins arrondis (RGBA, fond transparent)."""
     w,h = size
-    im = Image.new("RGB", (w,h), c1); px = im.load()
-    c1, c2 = hex_to_rgb(c1), hex_to_rgb(c2)
-    for y in range(h):
-        t = y/(h-1)
-        r = int(lerp(c1[0], c2[0], t)); g = int(lerp(c1[1], c2[1], t)); b = int(lerp(c1[2], c2[2], t))
-        for x in range(w): px[x,y] = (r,g,b)
-    return im
+    base = Image.new("RGBA", (w,h), (0,0,0,0))
+    shape = Image.new("L", (w,h), 0)
+    d = ImageDraw.Draw(shape)
+    d.rounded_rectangle((0,0,w,h), radius, fill=255)
+    card = Image.new("RGBA", (w,h), hex_to_rgb(fill_hex)+(255,))
+    base.paste(card, (0,0), shape)
+    return base
 
-def rounded(img, r):
-    """Retourne une image RGBA avec coins arrondis et alpha correct (pour coller sans débordement)."""
-    mask = Image.new("L", img.size, 0)
-    d = ImageDraw.Draw(mask); d.rounded_rectangle([0,0,*img.size], r, fill=255)
-    out = Image.new("RGBA", img.size)
-    out.paste(img, (0,0), mask)
-    return out
-
-# ─────────────── fonts (présentes sur runner) ───────────────
+# ───────────── polices (runners Ubuntu) ─────────────
 def font_b(sz): return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", sz)
 def font_r(sz): return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", sz)
 
-# ─────────────────────── icônes blanches ─────────────────────
-def draw_calendar(draw, cx, cy, scale=1.0):
-    # bloc principal
-    w,h = int(180*scale), int(150*scale)
-    x0,y0 = cx-w//2, cy-h//2+8
-    draw.rounded_rectangle((x0,y0,x0+w,y0+h), radius=int(24*scale), fill=(255,255,255))
-    # anneaux
-    draw.rectangle((x0+int(28*scale), y0-int(24*scale), x0+int(60*scale), y0), fill=(255,255,255))
-    draw.rectangle((x0+w-int(60*scale), y0-int(24*scale), x0+w-int(28*scale), y0), fill=(255,255,255))
+# ───────────── icônes SVG → PNG (CairoSVG) ─────────────
+from cairosvg import svg2png
 
-def draw_home(draw, cx, cy, scale=1.0):
-    s = int(180*scale)
-    # toit
-    draw.polygon([(cx, cy-s//2), (cx-s//2, cy), (cx+s//2, cy)], fill=(255,255,255))
-    # corps
-    w, h = int(160*scale), int(120*scale)
-    x0,y0 = cx-w//2, cy
-    draw.rectangle((x0, y0, x0+w, y0+h), fill=(255,255,255))
+SVG_CALENDAR = """
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none"
+     xmlns="http://www.w3.org/2000/svg">
+  <rect x="16" y="28" width="96" height="84" rx="12" fill="white" stroke="#1e1e1e" stroke-width="6"/>
+  <rect x="16" y="28" width="96" height="20" rx="6" fill="#1e1e1e"/>
+  <rect x="32" y="8" width="16" height="24" rx="8" fill="#1e1e1e"/>
+  <rect x="80" y="8" width="16" height="24" rx="8" fill="#1e1e1e"/>
+  <!-- petites cases -->
+  <g fill="#1e1e1e">
+    <rect x="32" y="58" width="16" height="12" rx="4"/>
+    <rect x="56" y="58" width="16" height="12" rx="4"/>
+    <rect x="80" y="58" width="16" height="12" rx="4"/>
+    <rect x="32" y="78" width="16" height="12" rx="4"/>
+    <rect x="56" y="78" width="16" height="12" rx="4"/>
+    <rect x="80" y="78" width="16" height="12" rx="4"/>
+    <rect x="32" y="98" width="16" height="12" rx="4"/>
+    <rect x="56" y="98" width="16" height="12" rx="4"/>
+    <rect x="80" y="98" width="16" height="12" rx="4"/>
+  </g>
+</svg>
+"""
 
-# ────────────────── dates FR + fuseau Paris ──────────────────
+SVG_HOUSE = """
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none"
+     xmlns="http://www.w3.org/2000/svg">
+  <!-- toit -->
+  <polygon points="20,64 64,28 108,64" fill="#e25d60" stroke="#c24a4d" stroke-width="6" stroke-linejoin="round"/>
+  <!-- corps -->
+  <rect x="28" y="60" width="72" height="56" rx="8" fill="#f2e0bd" stroke="#c19a6b" stroke-width="6"/>
+  <!-- porte -->
+  <rect x="58" y="84" width="18" height="32" rx="4" fill="#775b4b"/>
+  <!-- fenêtre -->
+  <rect x="72" y="76" width="20" height="14" rx="3" fill="#7dd3fc" stroke="#388fb7" stroke-width="5"/>
+  <!-- jardinière -->
+  <rect x="70" y="90" width="24" height="6" rx="3" fill="#2f855a"/>
+</svg>
+"""
+
+def render_svg(svg_str, width, height):
+    png_bytes = svg2png(bytestring=svg_str.encode("utf-8"), output_width=width, output_height=height, background_color=None)
+    return Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+
+# ───────────── dates FR + fuseau ─────────────
 try:
     from zoneinfo import ZoneInfo
     PARIS = ZoneInfo("Europe/Paris")
@@ -87,28 +110,31 @@ now_utc = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
 now_paris = now_utc.astimezone(PARIS) if PARIS else now_utc
 today = now_paris.date()
 
-# ────────────────────── canvas global ────────────────────────
-BG_RGB = hex_to_rgb(BG)
-canvas = Image.new("RGB", (W,H), BG_RGB)
+# ───────────── canvas global (TRANSPARENT) ─────────────
+canvas = Image.new("RGBA", (W,H), (0,0,0,0))
 
-# calcul cartes (2 colonnes)
+# géométrie des cartes
 card_w = (W - 2*M - GAP) // 2
 card_h = H - 2*M
+x_positions = [M, M + card_w + GAP]
 
-def draw_card(label, date_iso, icon, c1, c2):
-    """Retourne une carte RGBA auto-contenue (rien ne dépasse)."""
-    # base carte
-    base = grad_rect((card_w, card_h), c1, c2)
-    card = rounded(base, CARD_R)  # RGBA coin arrondi
-    # on dessine TOUT à l'intérieur de 'card'
+def draw_card(card_color, label, date_iso, icon_name):
+    # carte de base
+    card = rounded_rect_rgba((card_w, card_h), CARD_R, card_color)
     d = ImageDraw.Draw(card)
 
-    # aire utile interne (pour éviter les bords)
-    usable_x0, usable_y0 = PAD_X, PAD_TOP
-    usable_x1, usable_y1 = card_w - PAD_X, card_h - PAD_BOTTOM
-    cx = (usable_x0 + usable_x1) // 2
+    # zone utile interne
+    x0, y0 = PAD_X, PAD_TOP
+    x1, y1 = card_w - PAD_X, card_h - PAD_BOTTOM
+    cx = (x0 + x1) // 2
 
-    # delta
+    # icône
+    svg = SVG_CALENDAR if icon_name == "calendar" else SVG_HOUSE
+    icon = render_svg(svg, ICON_W, ICON_H)
+    icon_y = y0
+    card.paste(icon, (cx - ICON_W//2, icon_y), icon)
+
+    # delta J - X
     target = dt.date.fromisoformat(date_iso)
     delta = (target - today).days
     if   delta > 1:  jtxt = f"J - {delta}"
@@ -116,60 +142,53 @@ def draw_card(label, date_iso, icon, c1, c2):
     elif delta == 0: jtxt = "AUJOURD’HUI"
     else:            jtxt = "PASSÉ"
 
-    # icône (2x plus petite)
-    top_icon = usable_y0 + 4
-    if icon == "calendar":
-        draw_calendar(d, cx, top_icon + int(90*ICON_SCALE), ICON_SCALE)
-    else:
-        draw_home(d, cx, top_icon + int(90*ICON_SCALE), ICON_SCALE)
+    fs = 72 if len(jtxt) <= 9 else 64
+    wj, hj = d.textbbox((0,0), jtxt, font=font_b(fs))[2:]
+    jy = icon_y + ICON_H + 18
+    d.text((cx - wj//2, jy), jtxt, font=font_b(fs), fill=(255,255,255,255))
 
-    # J - X
-    fs = 92 if len(jtxt) <= 7 else 80
-    j_bbox = d.textbbox((0,0), jtxt, font=font_b(fs))
-    j_w, j_h = j_bbox[2]-j_bbox[0], j_bbox[3]-j_bbox[1]
-    j_y = top_icon + int(180*ICON_SCALE) + 16
-    d.text((cx - j_w//2, j_y), jtxt, font=font_b(fs), fill="white")
-
-    # pastille date
+    # pastille date (couleur = card assombrie)
     date_str = format_date_fr(target)
-    fw = font_b(34)
-    tw, th = d.textbbox((0,0), date_str, font=fw)[2:]
-    pill_pad_x, pill_pad_y = 26, 10
+    fdate = font_b(30)
+    tw, th = d.textbbox((0,0), date_str, font=fdate)[2:]
+    pill_pad_x, pill_pad_y = 22, 8
     pill_w, pill_h = tw + pill_pad_x*2, th + pill_pad_y*2
-    pill = Image.new("RGBA", (pill_w, pill_h), (255,255,255,38))
+    pill = Image.new("RGBA", (pill_w, pill_h), darken(card_color, 0.28))
     # arrondi pastille
     mask = Image.new("L", (pill_w, pill_h), 0)
     ImageDraw.Draw(mask).rounded_rectangle((0,0,pill_w,pill_h), radius=pill_h//2, fill=255)
     px = cx - pill_w//2
-    py = j_y + j_h + 22
+    py = jy + hj + 16
     card.paste(pill, (px, py), mask)
-    d.text((cx - tw//2, py + pill_pad_y - 3), date_str, font=fw, fill="white")
+    d.text((cx - tw//2, py + pill_pad_y - 2), date_str, font=fdate, fill=(255,255,255,255))
 
     # label
-    lbl_f = font_b(40)
-    lw, lh = d.textbbox((0,0), label, font=lbl_f)[2:]
-    label_y = py + pill_h + 18
-    # clamp si ça dépasse (on réduit la police si nécessaire)
-    if label_y + lh > usable_y1:
-        lbl_f = font_b(36)
-        lw, lh = d.textbbox((0,0), label, font=lbl_f)[2:]
-        label_y = min(label_y, usable_y1 - lh)
-    d.text((cx - lw//2, label_y), label, font=lbl_f, fill="white")
+    flab = font_b(36)
+    lw, lh = d.textbbox((0,0), label, font=flab)[2:]
+    ly = py + pill_h + 14
+    # si trop bas, réduit un peu
+    if ly + lh > y1:
+        flab = font_b(32)
+        lw, lh = d.textbbox((0,0), label, font=flab)[2:]
+        ly = min(ly, y1 - lh)
+    d.text((cx - lw//2, ly), label, font=flab, fill=(255,255,255,255))
 
     return card
 
-# dessiner et coller les cartes (sans ombres externes, sans débordement)
-x_positions = [M, M + card_w + GAP]
-for i, (label, date_iso, icon, c1, c2) in enumerate(EVENTS[:2]):
-    card_img = draw_card(label, date_iso, icon, c1, c2)
-    canvas.paste(card_img, (x_positions[i], M), card_img)  # collage via alpha → rien ne dépasse
+# dessiner et coller les deux cartes (aucun débordement)
+for i,(label, date_iso, icon, color) in enumerate(EVENTS[:2]):
+    card_img = draw_card(color, label, date_iso, icon)
+    canvas.paste(card_img, (x_positions[i], M), card_img)
 
-# envoi au webhook (image attachée dans l'embed)
-buf = io.BytesIO(); canvas.save(buf, format="PNG"); buf.seek(0)
-files = { "file": ("countdowns.png", buf, "image/png") }
+# ───────────── envoi Discord (image attachée) ─────────────
+buf = io.BytesIO()
+canvas.save(buf, format="PNG")
+buf.seek(0)
+
+files = {"file": ("countdowns.png", buf, "image/png")}
 payload = {
     "username": "Compte à rebours",
-    "embeds": [{ "image": {"url": "attachment://countdowns.png"} }]
+    "embeds": [{ "image": { "url": "attachment://countdowns.png" } }]
 }
 import json
 r = requests.post(WEBHOOK, data={"payload_json": json.dumps(payload)}, files=files, timeout=30)
