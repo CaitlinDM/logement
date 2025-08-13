@@ -5,7 +5,6 @@ on:
     # Été (CEST): 05:00 UTC = 07:00 Paris
     # Hiver (CET): 06:00 UTC = 07:00 Paris
     - cron: "0 5,6 * * *"
-  # Test manuel depuis l'onglet "Actions"
   workflow_dispatch:
 
 jobs:
@@ -15,11 +14,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Show repo tree (preflight)
-        run: |
-          echo "Working dir: $(pwd)"
-          ls -la
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,62 +25,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pillow tzdata
 
-      - name: Preflight checks
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          set -e
-          test -f "countdown.py" || (echo "::error file=countdown.py::countdown.py introuvable à la racine" && exit 1)
-          test -f "calendrier.png" || (echo "::error file=calendrier.png::calendrier.png introuvable à la racine" && exit 1)
-          test -f "home-sweet-home.png" || (echo "::error file=home-sweet-home.png::home-sweet-home.png introuvable à la racine" && exit 1)
-          if [ -z "${DISCORD_WEBHOOK_URL}" ]; then
-            echo "::error::Secret DISCORD_WEBHOOK_URL manquant (Settings > Secrets and variables > Actions)."
-            exit 1
-          fi
-          echo "✅ Preflight OK."
-
-      # Envoi d'un ping @everyone (UNIQUEMENT lors d'un Run workflow manuel) pour valider le webhook
-      - name: Manual ping to Discord (@everyone)
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          python - <<'PY'
-          import os, requests, json
-          url = os.environ["DISCORD_WEBHOOK_URL"]
-          payload = {
-            "content": "@everyone (test manuel) — webhook OK ✅",
-            "allowed_mentions": {"parse": ["everyone"]}
-          }
-          r = requests.post(url, json=payload, timeout=20)
-          print("Ping status:", r.status_code, r.text if r.status_code != 204 else "(no content)")
-          r.raise_for_status()
-          PY
-
-      # Envoi auto à 07:00 Paris ; envoi forcé si "Run workflow"
-      - name: Run countdown (image + @everyone)
+      # Envoi auto à 07:00 Europe/Paris ; envoi forcé si "Run workflow"
+      - name: Run countdown
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
         run: |
           python - <<'PY'
-          import os, datetime as dt, traceback, sys
+          import os, datetime as dt
           from zoneinfo import ZoneInfo
+          import countdown
 
           force = os.getenv("FORCE_SEND") == "1"
           now_paris = dt.datetime.now(ZoneInfo("Europe/Paris"))
-          print(f"[info] Paris time: {now_paris:%Y-%m-%d %H:%M:%S} | FORCE_SEND={force}")
-
           if not force and now_paris.hour != 7:
-            print(f"[skip] Il est {now_paris:%H:%M}, pas 07:00 (Europe/Paris).")
-            raise SystemExit(0)
+              print(f"[skip] Paris time is {now_paris:%H:%M}, not 07:00.")
+              raise SystemExit(0)
 
-          try:
-            import countdown
-            countdown.run()
-            print("✅ Image envoyée avec @everyone.")
-          except Exception as e:
-            print("❌ Erreur pendant countdown.run():")
-            traceback.print_exc()
-            sys.exit(1)
+          countdown.run()
           PY
